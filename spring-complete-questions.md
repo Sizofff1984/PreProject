@@ -36,7 +36,7 @@
 17. [Как вернуть страницу в контроллере? Как вернуть данные?](#17-как-вернуть-страницу-в-контроллере-как-вернуть-данные)
 
 ### Принципы и паттерны
-18. [Уметь рассказать про принципы работы Spring](#18-уметь-рассказать-про-принципы-работы-spring)
+18. [Принципы работы Spring](#18-принципы-работы-spring)
 19. [Связывание бинов и их жизненный цикл](#19-связывание-бинов-и-их-жизненный-цикл)
 20. [Основные паттерны Spring](#20-основные-паттерны-spring)
 
@@ -1510,6 +1510,505 @@ public class SecurityConfig {
 
 ---
 
+### 22. Объекты Principal, Authorities, Authentication
+
+#### Principal
+**Principal** - представляет текущего пользователя в системе.
+
+```java
+@Service
+public class UserService {
+    @Autowired
+    private Authentication authentication;
+    
+    public String getCurrentUsername() {
+        if (authentication != null && authentication.isAuthenticated()) {
+            return authentication.getName(); // возвращает username
+        }
+        return "anonymous";
+    }
+    
+    public User getCurrentUser() {
+        if (authentication != null && authentication.getPrincipal() instanceof UserDetails) {
+            UserDetails userDetails = (UserDetails) authentication.getPrincipal();
+            return userRepository.findByUsername(userDetails.getUsername());
+        }
+        return null;
+    }
+}
+```
+
+#### Authorities (полномочия)
+**Authorities** - набор прав доступа пользователя.
+
+```java
+@Service
+public class AuthorityService {
+    public Set<GrantedAuthority> getUserAuthorities(User user) {
+        Set<GrantedAuthority> authorities = new HashSet<>();
+        
+        // Добавляем роль
+        authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
+        
+        // Добавляем права
+        if (user.isAdmin()) {
+            authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
+            authorities.add(new SimpleGrantedAuthority("USER_WRITE"));
+            authorities.add(new SimpleGrantedAuthority("USER_DELETE"));
+        }
+        
+        if (user.canManageOrders()) {
+            authorities.add(new SimpleGrantedAuthority("ORDER_MANAGE"));
+        }
+        
+        return authorities;
+    }
+}
+```
+
+#### Authentication (аутентификация)
+**Authentication** - объект, содержащий информацию о пользователе и его полномочиях.
+
+```java
+@Service
+public class AuthService {
+    public void processAuthentication(Authentication authentication) {
+        // Получаем имя пользователя
+        String username = authentication.getName();
+        
+        // Получаем полномочия
+        Collection<? extends GrantedAuthority> authorities = authentication.getAuthorities();
+        
+        // Проверяем аутентификацию
+        if (authentication.isAuthenticated()) {
+            System.out.println("User " + username + " is authenticated");
+            
+            // Проверяем наличие роли
+            boolean isAdmin = authorities.stream()
+                .anyMatch(auth -> auth.getAuthority().equals("ROLE_ADMIN"));
+            
+            if (isAdmin) {
+                System.out.println("User has admin privileges");
+            }
+        }
+        
+        // Получаем детали (если есть)
+        Object principal = authentication.getPrincipal();
+        if (principal instanceof UserDetails) {
+            UserDetails userDetails = (UserDetails) principal;
+            boolean isAccountNonExpired = userDetails.isAccountNonExpired();
+            boolean isAccountNonLocked = userDetails.isAccountNonLocked();
+            boolean isCredentialsNonExpired = userDetails.isCredentialsNonExpired();
+            boolean isEnabled = userDetails.isEnabled();
+        }
+    }
+}
+```
+
+#### Кастомная реализация UserDetails
+
+```java
+public class CustomUserDetails implements UserDetails {
+    private User user;
+    
+    public CustomUserDetails(User user) {
+        this.user = user;
+    }
+    
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        Set<GrantedAuthority> authorities = new HashSet<>();
+        authorities.add(new SimpleGrantedAuthority("ROLE_" + user.getRole()));
+        
+        // Добавляем права на основе роли
+        if (user.isAdmin()) {
+            authorities.add(new SimpleGrantedAuthority("USER_WRITE"));
+            authorities.add(new SimpleGrantedAuthority("USER_DELETE"));
+        }
+        
+        return authorities;
+    }
+    
+    @Override
+    public String getPassword() {
+        return user.getPassword();
+    }
+    
+    @Override
+    public String getUsername() {
+        return user.getUsername();
+    }
+    
+    @Override
+    public boolean isAccountNonExpired() {
+        return !user.isExpired();
+    }
+    
+    @Override
+    public boolean isAccountNonLocked() {
+        return !user.isLocked();
+    }
+    
+    @Override
+    public boolean isCredentialsNonExpired() {
+        return !user.isPasswordExpired();
+    }
+    
+    @Override
+    public boolean isEnabled() {
+        return user.isActive();
+    }
+}
+```
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
+### 23. Чем отличается InMemoryAuthentication от BasicAuthentication?
+
+#### InMemoryAuthentication (в памяти)
+
+```java
+@Configuration
+@EnableWebSecurity
+public class InMemorySecurityConfig {
+    
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+    
+    @Bean
+    public UserDetailsService userDetailsService() {
+        InMemoryUserDetailsManager manager = new InMemoryUserDetailsManager();
+        
+        // Создаем пользователей в памяти
+        manager.createUser(User.withUsername("admin")
+            .password(passwordEncoder().encode("admin123"))
+            .roles("ADMIN")
+            .authorities("USER_READ", "USER_WRITE", "USER_DELETE")
+            .build());
+            
+        manager.createUser(User.withUsername("user")
+            .password(passwordEncoder().encode("user123"))
+            .roles("USER")
+            .authorities("USER_READ")
+            .build());
+            
+        return manager;
+    }
+    
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(authz -> authz
+                .requestMatchers("/admin/**").hasRole("ADMIN")
+                .requestMatchers("/user/**").hasRole("USER")
+                .anyRequest().authenticated()
+            )
+            .httpBasic(withDefaults());
+        
+        return http.build();
+    }
+}
+```
+
+**Особенности InMemoryAuthentication:**
+- **Пользователи в памяти** - данные теряются при перезапуске
+- **Простая настройка** - для тестирования и разработки
+- **Быстрая инициализация** - нет обращения к БД
+- **Не масштабируется** - не подходит для продакшена
+
+#### BasicAuthentication (базовая аутентификация)
+
+```java
+@Configuration
+@EnableWebSecurity
+public class BasicAuthSecurityConfig {
+    
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+    
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(authz -> authz
+                .requestMatchers("/public/**").permitAll()
+                .anyRequest().authenticated()
+            )
+            .httpBasic(withDefaults())
+            .csrf().disable(); // Отключаем CSRF для API
+        
+        return http.build();
+    }
+}
+```
+
+#### Database Authentication (рекомендуемый)
+
+```java
+@Configuration
+@EnableWebSecurity
+public class DatabaseSecurityConfig {
+    
+    @Autowired
+    private CustomUserDetailsService userDetailsService;
+    
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+    
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(authz -> authz
+                .requestMatchers("/login", "/register").permitAll()
+                .requestMatchers("/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated()
+            )
+            .formLogin(form -> form
+                .loginPage("/login")
+                .defaultSuccessUrl("/dashboard")
+                .permitAll()
+            )
+            .logout(logout -> logout
+                .logoutSuccessUrl("/login?logout")
+                .permitAll()
+            );
+        
+        return http.build();
+    }
+}
+
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+    
+    @Autowired
+    private UserRepository userRepository;
+    
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username)
+            .orElseThrow(() -> new UsernameNotFoundException("User not found: " + username));
+        
+        return new CustomUserDetails(user);
+    }
+}
+```
+
+#### Сравнение методов аутентификации:
+
+| Аспект | InMemory | Basic Auth | Database Auth |
+|--------|----------|------------|---------------|
+| **Хранение** | В памяти | Любой источник | База данных |
+| **Постоянство** | Нет | Да | Да |
+| **Масштабируемость** | Низкая | Высокая | Высокая |
+| **Безопасность** | Средняя | Высокая | Высокая |
+| **Сложность** | Низкая | Средняя | Высокая |
+| **Использование** | Тесты | API | Продакшен |
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
+### 24. Как добавить секьюрность к контроллеру?
+
+#### Способ 1: Аннотации на уровне метода
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    
+    @PreAuthorize("hasRole('ADMIN')")
+    @GetMapping
+    public List<User> getAllUsers() {
+        return userService.findAll();
+    }
+    
+    @PreAuthorize("hasRole('USER') and #id == authentication.name")
+    @GetMapping("/{id}")
+    public User getUser(@PathVariable Long id) {
+        return userService.findById(id);
+    }
+    
+    @PreAuthorize("hasAuthority('USER_WRITE')")
+    @PostMapping
+    public User createUser(@RequestBody User user) {
+        return userService.create(user);
+    }
+    
+    @PreAuthorize("hasRole('ADMIN') or (hasRole('USER') and @userService.isOwner(#id, authentication.name))")
+    @PutMapping("/{id}")
+    public User updateUser(@PathVariable Long id, @RequestBody User user) {
+        return userService.update(id, user);
+    }
+    
+    @PreAuthorize("hasAuthority('USER_DELETE')")
+    @DeleteMapping("/{id}")
+    public void deleteUser(@PathVariable Long id) {
+        userService.delete(id);
+    }
+}
+```
+
+#### Способ 2: Аннотации на уровне класса
+
+```java
+@RestController
+@RequestMapping("/api/admin")
+@PreAuthorize("hasRole('ADMIN')")
+public class AdminController {
+    
+    @GetMapping("/users")
+    public List<User> getAllUsers() {
+        return userService.findAll();
+    }
+    
+    @PreAuthorize("hasAuthority('USER_DELETE')")
+    @DeleteMapping("/users/{id}")
+    public void deleteUser(@PathVariable Long id) {
+        userService.delete(id);
+    }
+}
+```
+
+#### Способ 3: Конфигурация в SecurityConfig
+
+```java
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true)
+public class SecurityConfig {
+    
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(authz -> authz
+                .requestMatchers("/api/public/**").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/users").hasRole("USER")
+                .requestMatchers(HttpMethod.POST, "/api/users").hasAuthority("USER_WRITE")
+                .requestMatchers(HttpMethod.PUT, "/api/users/**").hasRole("USER")
+                .requestMatchers(HttpMethod.DELETE, "/api/users/**").hasRole("ADMIN")
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                .anyRequest().authenticated()
+            )
+            .httpBasic(withDefaults())
+            .csrf().disable();
+        
+        return http.build();
+    }
+}
+```
+
+#### Способ 4: Кастомные проверки
+
+```java
+@RestController
+@RequestMapping("/api/documents")
+public class DocumentController {
+    
+    @PreAuthorize("@documentSecurityService.canAccess(#id, authentication.name)")
+    @GetMapping("/{id}")
+    public Document getDocument(@PathVariable Long id) {
+        return documentService.findById(id);
+    }
+    
+    @PreAuthorize("@documentSecurityService.canEdit(#id, authentication.name)")
+    @PutMapping("/{id}")
+    public Document updateDocument(@PathVariable Long id, @RequestBody Document document) {
+        return documentService.update(id, document);
+    }
+}
+
+@Service
+public class DocumentSecurityService {
+    
+    @Autowired
+    private DocumentRepository documentRepository;
+    
+    public boolean canAccess(Long documentId, String username) {
+        Document document = documentRepository.findById(documentId);
+        return document.getOwner().equals(username) || 
+               document.getSharedUsers().contains(username);
+    }
+    
+    public boolean canEdit(Long documentId, String username) {
+        Document document = documentRepository.findById(documentId);
+        return document.getOwner().equals(username);
+    }
+}
+```
+
+#### Способ 5: Проверка в коде контроллера
+
+```java
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    
+    @Autowired
+    private SecurityService securityService;
+    
+    @GetMapping("/{id}")
+    public Order getOrder(@PathVariable Long id, Authentication authentication) {
+        Order order = orderService.findById(id);
+        
+        // Проверяем права доступа
+        if (!securityService.canAccessOrder(order, authentication)) {
+            throw new AccessDeniedException("You don't have permission to access this order");
+        }
+        
+        return order;
+    }
+    
+    @PostMapping
+    public Order createOrder(@RequestBody Order order, Authentication authentication) {
+        // Проверяем, что пользователь может создавать заказы
+        if (!securityService.canCreateOrder(authentication)) {
+            throw new AccessDeniedException("You don't have permission to create orders");
+        }
+        
+        return orderService.create(order, authentication.getName());
+    }
+}
+```
+
+#### Настройка для включения аннотаций
+
+```java
+@Configuration
+@EnableMethodSecurity(prePostEnabled = true)
+public class MethodSecurityConfig {
+    // Дополнительная настройка если нужна
+}
+```
+
+#### Практические рекомендации:
+
+**Используйте аннотации для:**
+- Простых проверок ролей и прав
+- Читаемого и явного кода
+- Централизованного управления безопасностью
+
+**Используйте конфигурацию для:**
+- Сложных URL-паттернов
+- Глобальных правил безопасности
+- Различных методов HTTP
+
+**Используйте кастомные проверки для:**
+- Бизнес-логики безопасности
+- Сложных условий доступа
+- Интеграции с внешними системами
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
 ### 25. Связи таблиц many-to-many и one-to-one
 
 #### One-to-One (Один к одному)
@@ -1601,6 +2100,197 @@ public class Course {
 
 ---
 
+### 26. Как работают каскады для таблиц и какие они бывают?
+
+#### Типы каскадов в JPA
+
+**CascadeType.ALL** - все операции каскадируются
+```java
+@Entity
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private List<Order> orders = new ArrayList<>();
+    
+    // При удалении пользователя удаляются все его заказы
+    // При сохранении пользователя сохраняются все заказы
+}
+```
+
+**CascadeType.PERSIST** - только сохранение
+```java
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.PERSIST)
+    private List<Address> addresses = new ArrayList<>();
+    
+    // При сохранении пользователя сохраняются адреса
+    // При удалении пользователя адреса НЕ удаляются
+}
+```
+
+**CascadeType.MERGE** - только обновление
+```java
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.MERGE)
+    private List<Profile> profiles = new ArrayList<>();
+    
+    // При обновлении пользователя обновляются профили
+    // При удалении пользователя профили НЕ удаляются
+}
+```
+
+**CascadeType.REMOVE** - только удаление
+```java
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.REMOVE)
+    private List<Session> sessions = new ArrayList<>();
+    
+    // При удалении пользователя удаляются сессии
+    // При сохранении пользователя сессии НЕ сохраняются
+}
+```
+
+**CascadeType.REFRESH** - только обновление из БД
+```java
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.REFRESH)
+    private List<Log> logs = new ArrayList<>();
+    
+    // При обновлении пользователя из БД обновляются логи
+}
+```
+
+**CascadeType.DETACH** - только отключение от контекста
+```java
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.DETACH)
+    private List<Cache> caches = new ArrayList<>();
+    
+    // При отключении пользователя от контекста отключаются кэши
+}
+```
+
+#### Комбинирование каскадов
+
+```java
+@Entity
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    // Для заказов - полный каскад
+    @OneToMany(mappedBy = "user", cascade = {CascadeType.PERSIST, CascadeType.MERGE, CascadeType.REMOVE})
+    private List<Order> orders = new ArrayList<>();
+    
+    // Для адресов - только сохранение и обновление
+    @OneToMany(mappedBy = "user", cascade = {CascadeType.PERSIST, CascadeType.MERGE})
+    private List<Address> addresses = new ArrayList<>();
+    
+    // Для логов - только обновление
+    @OneToMany(mappedBy = "user", cascade = CascadeType.MERGE)
+    private List<Log> logs = new ArrayList<>();
+}
+```
+
+#### Практические примеры
+
+**Сохранение с каскадом:**
+```java
+@Service
+@Transactional
+public class UserService {
+    
+    public User createUserWithOrders(User user, List<Order> orders) {
+        // Устанавливаем связь
+        user.setOrders(orders);
+        orders.forEach(order -> order.setUser(user));
+        
+        // Сохраняем только пользователя - заказы сохранятся автоматически
+        return userRepository.save(user);
+    }
+}
+```
+
+**Удаление с каскадом:**
+```java
+@Service
+@Transactional
+public class UserService {
+    
+    public void deleteUser(Long userId) {
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new UserNotFoundException("User not found"));
+        
+        // Удаляем только пользователя - заказы удалятся автоматически
+        userRepository.delete(user);
+    }
+}
+```
+
+#### Осторожность с каскадами
+
+**Проблема N+1 запросов:**
+```java
+// Плохо - может вызвать N+1 проблему
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.EAGER)
+    private List<Order> orders = new ArrayList<>();
+}
+
+// Хорошо - используем LAZY загрузку
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private List<Order> orders = new ArrayList<>();
+}
+```
+
+**Проблема с производительностью:**
+```java
+// Осторожно с большими коллекциями
+@Entity
+public class User {
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+    private List<Log> logs = new ArrayList<>(); // Может быть миллионы записей!
+    
+    // Лучше использовать отдельный сервис для логов
+}
+```
+
+#### Рекомендации по использованию каскадов:
+
+**Используйте CascadeType.ALL для:**
+- Тесно связанных сущностей (User-Profile)
+- Небольших коллекций
+- Сущностей, которые не имеют смысла без родителя
+
+**Используйте CascadeType.PERSIST для:**
+- Создания связанных сущностей
+- Когда дочерние сущности должны существовать только с родителем
+
+**Используйте CascadeType.MERGE для:**
+- Обновления связанных сущностей
+- Когда нужно синхронизировать изменения
+
+**НЕ используйте каскады для:**
+- Больших коллекций
+- Сущностей с собственной бизнес-логикой
+- Связей, которые могут быть разорваны
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
 ### 27. REST-сервисы: преимущества и недостатки
 
 #### Преимущества REST
@@ -1667,6 +2357,243 @@ public List<Order> getUserOrders(@PathVariable Long id) {
     return orderService.findByUserId(id); // Отдельный запрос для заказов
 }
 ```
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
+### 28. Форматы данных в REST-сервисах
+
+#### JSON (JavaScript Object Notation)
+
+**Самый популярный формат для REST API:**
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    
+    @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
+    public List<User> getAllUsers() {
+        return userService.findAll();
+    }
+    
+    @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
+    public User createUser(@RequestBody User user) {
+        return userService.create(user);
+    }
+}
+```
+
+**Пример JSON запроса/ответа:**
+```json
+// POST /api/users
+{
+    "name": "John Doe",
+    "email": "john@example.com",
+    "age": 30
+}
+
+// Ответ
+{
+    "id": 1,
+    "name": "John Doe",
+    "email": "john@example.com",
+    "age": 30,
+    "createdAt": "2023-12-01T10:00:00Z"
+}
+```
+
+#### XML (eXtensible Markup Language)
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    
+    @GetMapping(produces = MediaType.APPLICATION_XML_VALUE)
+    public List<User> getAllUsers() {
+        return userService.findAll();
+    }
+    
+    @PostMapping(consumes = MediaType.APPLICATION_XML_VALUE)
+    public User createUser(@RequestBody User user) {
+        return userService.create(user);
+    }
+}
+```
+
+**Пример XML запроса/ответа:**
+```xml
+<!-- POST /api/users -->
+<user>
+    <name>John Doe</name>
+    <email>john@example.com</email>
+    <age>30</age>
+</user>
+
+<!-- Ответ -->
+<user>
+    <id>1</id>
+    <name>John Doe</name>
+    <email>john@example.com</email>
+    <age>30</age>
+    <createdAt>2023-12-01T10:00:00Z</createdAt>
+</user>
+```
+
+#### Поддержка нескольких форматов
+
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    
+    @GetMapping(produces = {MediaType.APPLICATION_JSON_VALUE, MediaType.APPLICATION_XML_VALUE})
+    public List<User> getAllUsers() {
+        return userService.findAll();
+    }
+    
+    @GetMapping(value = "/{id}", produces = {MediaType.APPLICATION_JSON_VALUE, MediaType.APPLICATION_XML_VALUE})
+    public User getUser(@PathVariable Long id) {
+        return userService.findById(id);
+    }
+}
+```
+
+#### Кастомные форматы
+
+**CSV формат:**
+```java
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    
+    @GetMapping(value = "/export", produces = "text/csv")
+    public ResponseEntity<String> exportUsers() {
+        List<User> users = userService.findAll();
+        String csv = convertToCsv(users);
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.valueOf("text/csv"));
+        headers.setContentDispositionFormData("attachment", "users.csv");
+        
+        return ResponseEntity.ok()
+            .headers(headers)
+            .body(csv);
+    }
+    
+    private String convertToCsv(List<User> users) {
+        StringBuilder csv = new StringBuilder();
+        csv.append("ID,Name,Email,Age\n");
+        
+        for (User user : users) {
+            csv.append(user.getId()).append(",")
+               .append(user.getName()).append(",")
+               .append(user.getEmail()).append(",")
+               .append(user.getAge()).append("\n");
+        }
+        
+        return csv.toString();
+    }
+}
+```
+
+**YAML формат:**
+```java
+@RestController
+@RequestMapping("/api/config")
+public class ConfigController {
+    
+    @GetMapping(produces = "application/x-yaml")
+    public ResponseEntity<String> getConfig() {
+        String yaml = """
+            database:
+              host: localhost
+              port: 5432
+              name: myapp
+            server:
+              port: 8080
+            """;
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.valueOf("application/x-yaml"));
+        
+        return ResponseEntity.ok()
+            .headers(headers)
+            .body(yaml);
+    }
+}
+```
+
+#### Настройка сериализации
+
+**Jackson конфигурация:**
+```java
+@Configuration
+public class JacksonConfig {
+    
+    @Bean
+    @Primary
+    public ObjectMapper objectMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        
+        // Настройки для JSON
+        mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        
+        // Форматирование дат
+        mapper.registerModule(new JavaTimeModule());
+        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        
+        return mapper;
+    }
+}
+```
+
+**JAXB конфигурация для XML:**
+```java
+@Configuration
+public class JaxbConfig {
+    
+    @Bean
+    public Jaxb2Marshaller jaxb2Marshaller() {
+        Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
+        marshaller.setPackagesToScan("com.example.model");
+        return marshaller;
+    }
+}
+```
+
+#### Сравнение форматов:
+
+| Формат | Размер | Читаемость | Производительность | Поддержка |
+|--------|--------|------------|-------------------|-----------|
+| **JSON** | Компактный | Высокая | Высокая | Универсальная |
+| **XML** | Большой | Средняя | Средняя | Широкая |
+| **CSV** | Очень компактный | Низкая | Очень высокая | Ограниченная |
+| **YAML** | Средний | Очень высокая | Низкая | Ограниченная |
+
+#### Рекомендации по выбору формата:
+
+**Используйте JSON для:**
+- REST API
+- Веб-приложений
+- Мобильных приложений
+- Микросервисов
+
+**Используйте XML для:**
+- Enterprise систем
+- SOAP сервисов
+- Систем с требованиями к валидации
+- Интеграции с legacy системами
+
+**Используйте CSV для:**
+- Экспорта данных
+- Аналитики
+- Массовой обработки
+- Простых структур данных
 
 [⬆️ Вернуться к списку вопросов](#-содержание)
 
@@ -1852,6 +2779,344 @@ public class UserRestController {
 - Микросервисов
 - Мобильных приложений
 - SPA (Single Page Applications)
+
+[⬆️ Вернуться к списку вопросов](#-содержание)
+
+---
+
+### 31. RestTemplate и его методы
+
+#### Что такое RestTemplate
+
+**RestTemplate** - это клиент для работы с REST API в Spring. Позволяет легко отправлять HTTP запросы и получать ответы.
+
+#### Настройка RestTemplate
+
+```java
+@Configuration
+public class RestTemplateConfig {
+    
+    @Bean
+    public RestTemplate restTemplate() {
+        RestTemplate restTemplate = new RestTemplate();
+        
+        // Добавляем перехватчики
+        restTemplate.setInterceptors(List.of(new LoggingInterceptor()));
+        
+        // Настраиваем таймауты
+        HttpComponentsClientHttpRequestFactory factory = new HttpComponentsClientHttpRequestFactory();
+        factory.setConnectTimeout(5000);
+        factory.setReadTimeout(10000);
+        restTemplate.setRequestFactory(factory);
+        
+        return restTemplate;
+    }
+}
+```
+
+#### Основные методы RestTemplate
+
+**GET запросы:**
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    // GET с возвратом объекта
+    public User getUser(Long id) {
+        String url = "http://localhost:8080/api/users/" + id;
+        return restTemplate.getForObject(url, User.class);
+    }
+    
+    // GET с возвратом ResponseEntity
+    public ResponseEntity<User> getUserWithHeaders(Long id) {
+        String url = "http://localhost:8080/api/users/" + id;
+        return restTemplate.getForEntity(url, User.class);
+    }
+    
+    // GET с параметрами
+    public List<User> getUsers(String name, Integer age) {
+        String url = "http://localhost:8080/api/users?name={name}&age={age}";
+        Map<String, Object> params = Map.of("name", name, "age", age);
+        
+        User[] users = restTemplate.getForObject(url, User[].class, params);
+        return Arrays.asList(users);
+    }
+    
+    // GET с URI переменными
+    public User getUserByUri(Long id) {
+        String url = "http://localhost:8080/api/users/{id}";
+        Map<String, Object> uriVariables = Map.of("id", id);
+        
+        return restTemplate.getForObject(url, User.class, uriVariables);
+    }
+}
+```
+
+**POST запросы:**
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    // POST с объектом в теле
+    public User createUser(User user) {
+        String url = "http://localhost:8080/api/users";
+        return restTemplate.postForObject(url, user, User.class);
+    }
+    
+    // POST с возвратом ResponseEntity
+    public ResponseEntity<User> createUserWithResponse(User user) {
+        String url = "http://localhost:8080/api/users";
+        return restTemplate.postForEntity(url, user, User.class);
+    }
+    
+    // POST с получением Location заголовка
+    public String createUserAndGetLocation(User user) {
+        String url = "http://localhost:8080/api/users";
+        URI location = restTemplate.postForLocation(url, user);
+        return location.toString();
+    }
+}
+```
+
+**PUT запросы:**
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    // PUT для обновления
+    public void updateUser(Long id, User user) {
+        String url = "http://localhost:8080/api/users/" + id;
+        restTemplate.put(url, user);
+    }
+    
+    // PUT с параметрами
+    public void updateUserWithParams(Long id, String name, String email) {
+        String url = "http://localhost:8080/api/users/{id}?name={name}&email={email}";
+        Map<String, Object> params = Map.of("id", id, "name", name, "email", email);
+        
+        restTemplate.put(url, null, params);
+    }
+}
+```
+
+**DELETE запросы:**
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    // DELETE для удаления
+    public void deleteUser(Long id) {
+        String url = "http://localhost:8080/api/users/" + id;
+        restTemplate.delete(url);
+    }
+    
+    // DELETE с параметрами
+    public void deleteUserWithParams(Long id, String reason) {
+        String url = "http://localhost:8080/api/users/{id}?reason={reason}";
+        Map<String, Object> params = Map.of("id", id, "reason", reason);
+        
+        restTemplate.delete(url, params);
+    }
+}
+```
+
+#### Работа с заголовками
+
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    public User getUserWithAuth(Long id, String token) {
+        String url = "http://localhost:8080/api/users/" + id;
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "Bearer " + token);
+        headers.set("Accept", "application/json");
+        
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        
+        ResponseEntity<User> response = restTemplate.exchange(
+            url, HttpMethod.GET, entity, User.class);
+        
+        return response.getBody();
+    }
+    
+    public User createUserWithHeaders(User user, String token) {
+        String url = "http://localhost:8080/api/users";
+        
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Authorization", "Bearer " + token);
+        
+        HttpEntity<User> entity = new HttpEntity<>(user, headers);
+        
+        return restTemplate.postForObject(url, entity, User.class);
+    }
+}
+```
+
+#### Обработка ошибок
+
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    public User getUserSafely(Long id) {
+        try {
+            String url = "http://localhost:8080/api/users/" + id;
+            return restTemplate.getForObject(url, User.class);
+        } catch (HttpClientErrorException e) {
+            if (e.getStatusCode() == HttpStatus.NOT_FOUND) {
+                throw new UserNotFoundException("User not found with id: " + id);
+            }
+            throw new RuntimeException("Error fetching user", e);
+        } catch (HttpServerErrorException e) {
+            throw new RuntimeException("Server error", e);
+        } catch (RestClientException e) {
+            throw new RuntimeException("Network error", e);
+        }
+    }
+}
+```
+
+#### Асинхронные запросы
+
+```java
+@Service
+public class AsyncUserService {
+    
+    @Autowired
+    private RestTemplate restTemplate;
+    
+    @Async
+    public CompletableFuture<User> getUserAsync(Long id) {
+        String url = "http://localhost:8080/api/users/" + id;
+        User user = restTemplate.getForObject(url, User.class);
+        return CompletableFuture.completedFuture(user);
+    }
+    
+    @Async
+    public CompletableFuture<List<User>> getUsersAsync() {
+        String url = "http://localhost:8080/api/users";
+        User[] users = restTemplate.getForObject(url, User[].class);
+        return CompletableFuture.completedFuture(Arrays.asList(users));
+    }
+}
+```
+
+#### Перехватчики (Interceptors)
+
+```java
+@Component
+public class LoggingInterceptor implements ClientHttpRequestInterceptor {
+    
+    private static final Logger logger = LoggerFactory.getLogger(LoggingInterceptor.class);
+    
+    @Override
+    public ClientHttpResponse intercept(
+            HttpRequest request, 
+            byte[] body, 
+            ClientHttpRequestExecution execution) throws IOException {
+        
+        logger.info("Request: {} {}", request.getMethod(), request.getURI());
+        logger.info("Headers: {}", request.getHeaders());
+        
+        ClientHttpResponse response = execution.execute(request, body);
+        
+        logger.info("Response: {} {}", response.getStatusCode(), response.getStatusText());
+        logger.info("Response Headers: {}", response.getHeaders());
+        
+        return response;
+    }
+}
+```
+
+#### Конфигурация с перехватчиками
+
+```java
+@Configuration
+public class RestTemplateConfig {
+    
+    @Bean
+    public RestTemplate restTemplate() {
+        RestTemplate restTemplate = new RestTemplate();
+        
+        // Добавляем перехватчики
+        List<ClientHttpRequestInterceptor> interceptors = List.of(
+            new LoggingInterceptor(),
+            new AuthInterceptor(),
+            new RetryInterceptor()
+        );
+        restTemplate.setInterceptors(interceptors);
+        
+        return restTemplate;
+    }
+}
+```
+
+#### Альтернативы RestTemplate
+
+**WebClient (рекомендуемый для новых проектов):**
+```java
+@Service
+public class UserService {
+    
+    @Autowired
+    private WebClient webClient;
+    
+    public Mono<User> getUser(Long id) {
+        return webClient
+            .get()
+            .uri("/api/users/{id}", id)
+            .retrieve()
+            .bodyToMono(User.class);
+    }
+    
+    public Flux<User> getUsers() {
+        return webClient
+            .get()
+            .uri("/api/users")
+            .retrieve()
+            .bodyToFlux(User.class);
+    }
+}
+```
+
+#### Преимущества и недостатки RestTemplate:
+
+**Преимущества:**
+- Простота использования
+- Синхронный API
+- Хорошая интеграция со Spring
+- Поддержка различных форматов данных
+
+**Недостатки:**
+- Синхронный (блокирующий)
+- Устаревший (deprecated в Spring 5)
+- Нет поддержки реактивного программирования
+
+**Рекомендации:**
+- Для новых проектов используйте WebClient
+- RestTemplate подходит для простых синхронных задач
+- WebClient лучше для высоконагруженных приложений
 
 [⬆️ Вернуться к списку вопросов](#-содержание)
 
